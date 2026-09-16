@@ -2,8 +2,10 @@ import math
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import silhouette_score
 
 # ------------------------------------------------------------
 # 기본 설정
@@ -29,28 +31,21 @@ raw_df = load_data()
 def prepare_features(df):
     df = df.copy()
 
-    # 첫 주 관객이 0이거나 필요한 값이 비어 있는 행 제거를 위해
-    # 우선 필요한 원본 열을 숫자형으로 변환
     needed_cols = ["first_scrn", "total_audi", "days_in_top10", "first_week_audi"]
     for col in needed_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # 결측치 제거 + 첫 주 관객 0인 영화 제거
     df = df.dropna(subset=needed_cols)
     df = df[df["first_week_audi"] != 0]
 
-    # 로그 변환 (상용로그, math.log10 사용)
-    # 0 이하 값이 있으면 로그를 계산할 수 없으므로 안전하게 제거
     df = df[(df["first_scrn"] > 0) & (df["total_audi"] > 0)]
 
     df["log_first_scrn"] = df["first_scrn"].apply(lambda x: math.log10(x))
     df["log_total_audi"] = df["total_audi"].apply(lambda x: math.log10(x))
 
-    # 롱런 지수: 누적 관객 / 첫 주 관객, 20 초과 시 20으로 자르기
     df["longrun_index"] = df["total_audi"] / df["first_week_audi"]
     df["longrun_index"] = df["longrun_index"].clip(upper=20)
 
-    # days_in_top10 은 그대로 사용
     df["top10_days"] = df["days_in_top10"]
 
     return df
@@ -85,20 +80,32 @@ if len(selected_features) < 2:
     st.stop()
 
 # ------------------------------------------------------------
-# 표준화 + K-평균 (군집 3개, 난수 고정)
+# 묶음 수 선택
+# ------------------------------------------------------------
+st.subheader("묶음 수 선택")
+n_clusters = st.slider("묶음 수(k)를 선택하세요.", min_value=2, max_value=7, value=3, step=1)
+
+ALL_SYMBOLS = ["㉮", "㉯", "㉰", "㉱", "㉲", "㉳", "㉴"]
+symbols = ALL_SYMBOLS[:n_clusters]
+
+# ------------------------------------------------------------
+# 표준화
 # ------------------------------------------------------------
 X = feature_df[selected_features].values
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(X)
 
-kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
+# ------------------------------------------------------------
+# K-평균 (선택한 묶음 수, 난수 고정)
+# ------------------------------------------------------------
+kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
 raw_labels = kmeans.fit_predict(X_scaled)
 
 feature_df = feature_df.copy()
 feature_df["raw_cluster"] = raw_labels
 
 # ------------------------------------------------------------
-# 군집 번호를 누적 관객 평균 기준으로 재배열 -> ㉮㉯㉰
+# 군집 번호를 누적 관객 평균 기준으로 재배열 -> ㉮㉯㉰...
 # ------------------------------------------------------------
 cluster_order = (
     feature_df.groupby("raw_cluster")["total_audi"]
@@ -108,7 +115,6 @@ cluster_order = (
 )
 
 symbol_map = {}
-symbols = ["㉮", "㉯", "㉰"]
 for rank, raw_c in enumerate(cluster_order):
     symbol_map[raw_c] = symbols[rank]
 
@@ -223,3 +229,51 @@ for sym in symbols:
     ).head(5)
     st.markdown(f"**{sym} 묶음**")
     st.write(", ".join(sub["movieNm"].tolist()))
+
+# ------------------------------------------------------------
+# 묶음 수에 따른 관성(군집 내 거리 제곱합) 변화 - 엘보우 그래프
+# ------------------------------------------------------------
+st.subheader("묶음 수에 따른 관성 변화 (엘보우 방법)")
+
+k_range = list(range(1, 8))
+inertia_list = []
+
+for k in k_range:
+    km = KMeans(n_clusters=k, random_state=42, n_init=10)
+    km.fit(X_scaled)
+    inertia_list.append(km.inertia_)
+
+fig_elbow = go.Figure()
+fig_elbow.add_trace(
+    go.Scatter(x=k_range, y=inertia_list, mode="lines+markers", name="관성 값")
+)
+fig_elbow.add_vline(x=n_clusters, line_dash="dash", line_color="red")
+fig_elbow.update_layout(
+    xaxis_title="묶음 수(k)",
+    yaxis_title="관성 값(군집 내 거리 제곱합)",
+)
+st.plotly_chart(fig_elbow, use_container_width=True)
+
+# ------------------------------------------------------------
+# 묶음 수별 관성 값과 감소량 표
+# ------------------------------------------------------------
+st.subheader("묶음 수별 관성 값과 감소량")
+
+decrease_list = [None]
+for i in range(1, len(inertia_list)):
+    decrease_list.append(inertia_list[i - 1] - inertia_list[i])
+
+inertia_table = pd.DataFrame(
+    {
+        "묶음 수(k)": k_range,
+        "관성 값": inertia_list,
+        "앞 값에서 줄어든 양": decrease_list,
+    }
+)
+st.dataframe(inertia_table, use_container_width=True)
+
+# ------------------------------------------------------------
+# 실루엣 점수
+# ------------------------------------------------------------
+sil_score = silhouette_score(X_scaled, raw_labels)
+st.write(f"현재 선택한 묶음 수({n_clusters})의 실루엣 점수: {sil_score:.3f}")
